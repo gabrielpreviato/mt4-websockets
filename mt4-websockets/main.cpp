@@ -7,6 +7,7 @@
 
 #include <winsock2.h>
 #include <iphlpapi.h> 
+#include <string>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment (lib, "crypt32")
 
@@ -14,10 +15,6 @@ using namespace std;
 
 #define MT_EXPFUNC extern "C" __declspec(dllexport)
 #define dbg(msg) writeLog(".\\webscoket.log", msg);
-
-static ix::WebSocket webSocket;
-static SafeVector messages;
-static string last_error;
 
 int writeLog(const char *file, const char *content) {
 	if (file && content) {
@@ -37,82 +34,193 @@ int writeLog(const char *file, const char *content) {
 	return 0;
 }
 
-MT_EXPFUNC int __stdcall SetHeader(const char *key, const char * value) {
-	ix::WebSocketHttpHeaders headers;
-	headers[key] = value;
-	webSocket.setExtraHeaders(headers);
-}
+class MT4WebSockets {
+public:
+	static int g_id;
 
-MT_EXPFUNC int __stdcall Init(const char *url, int timeout, int heat_beat_period) {
-	string server_url(url);
-
-	try {
-		ix::initNetSystem();
-
-		webSocket.setUrl(server_url);
-
-		webSocket.setPingInterval(heat_beat_period);
-
-		// Per message deflate connection is enabled by default. You can tweak its parameters or disable it
-		webSocket.disablePerMessageDeflate();
-
-		// Setup a callback to be fired when a message or an event (open, close, error) is received
-		webSocket.setOnMessageCallback([](const ix::WebSocketMessagePtr& msg)
-		{
-			if (msg->type == ix::WebSocketMessageType::Message)
-			{
-				messages.push_back(msg->str);
-			}
+	MT4WebSockets() = default;
+	/*MT4WebSockets& operator=(const MT4WebSockets& other) {
+		if (this != &other) {
+			this->webSocket = other.webSocket.;
+			this->last_error = other.last_error;
 		}
-		);
+		return *this;
+	}*/
 
-		ix::WebSocketInitResult r = webSocket.connect(timeout);
-
-		if (r.success) {
-			webSocket.start();
-
-			last_error.clear();
-			return 1;
-		}
-		
-		last_error.append(r.errorStr);
+	int SetHeader(const char *key, const char *value) {
+		ix::WebSocketHttpHeaders headers;
+		headers[key] = value;
+		webSocket.setExtraHeaders(headers);
 		return 0;
 	}
-	catch (std::exception & e) {
-//		std::cerr << "websockets something wrong happened! " << std::endl;
-//		std::cerr << e.what() << std::endl;
-		dbg(e.what());
-		last_error.append(e.what());
-	}
-	catch (...) {
+
+	int Init(const char *url, int timeout, int heat_beat_period) {
+		string server_url(url);
+
+		try {
+			ix::initNetSystem();
+
+			webSocket.setUrl(server_url);
+
+			webSocket.setPingInterval(heat_beat_period);
+
+			// Per message deflate connection is enabled by default. You can tweak its parameters or disable it
+			webSocket.disablePerMessageDeflate();
+
+			// Setup a callback to be fired when a message or an event (open, close, error) is received
+			webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg)
+			{
+				if (msg->type == ix::WebSocketMessageType::Message)
+				{
+					messages.push_back(msg->str);
+				}
+				else if (msg->type == ix::WebSocketMessageType::Open)
+				{
+					messages.push_back(msg->str);
+				}
+				else if (msg->type == ix::WebSocketMessageType::Close)
+				{
+					messages.push_back(msg->str);
+				}
+				else if (msg->type == ix::WebSocketMessageType::Error)
+				{
+					messages.push_back(msg->str);
+				}
+			}
+			);
+
+			ix::WebSocketInitResult r = webSocket.connect(timeout);
+
+			if (r.success) {
+				webSocket.start();
+
+				last_error.clear();
+				return 1;
+			}
+
+			last_error.append(r.errorStr);
+			return 0;
+		}
+		catch (std::exception & e) {
+			dbg(e.what());
+			last_error.append(e.what());
+		}
+		catch (...) {
+		}
+
+		return 0;
 	}
 
+	void Deinit() {
+		try {
+			webSocket.stop();
+			ix::uninitNetSystem();
+		}
+		catch (std::exception & e) {
+			dbg(e.what());
+		}
+		catch (...) {
+		}
+	}
 
-	return 0;
+	void WSGetLastError(char *data) {
+		if (last_error.length() > 0) {
+			strcpy(data, last_error.c_str());
+			strcat(data, "\0");
+		}
+	}
+
+	int GetCommand(char *data) {
+		if (messages.size() > 0) {
+			strcpy(data, messages.back().c_str());
+			strcat(data, "\0");
+
+			messages.pop_back();
+
+			return 1;
+		}
+
+		return 0;
+	}
+
+	int SendCommand(const char *command) {
+		webSocket.send(command);
+		return 1;
+	}
+
+private:
+	ix::WebSocket webSocket;
+	SafeVector messages;
+	string last_error = "";
+};
+
+int MT4WebSockets::g_id = 0;
+
+// Global functions to interface with the MT4WebSockets class
+static unordered_map<int, MT4WebSockets*> wsProcessor;
+
+MT_EXPFUNC int __stdcall CreateWS() {
+	if (wsProcessor.find(MT4WebSockets::g_id) == wsProcessor.end()) {
+		wsProcessor.emplace(MT4WebSockets::g_id, new MT4WebSockets());
+		MT4WebSockets::g_id++;
+	}
+
+	return MT4WebSockets::g_id - 1;
 }
 
-MT_EXPFUNC void __stdcall Deinit() {
-	try {
-		webSocket.stop();
-		ix::uninitNetSystem();		
-	}
-	catch (std::exception & e) {
-	//	std::cerr << e.what() << std::endl;
-		dbg(e.what());
-	}
-	catch (...) {
+MT_EXPFUNC int __stdcall SetHeader(const int id, const char *key, const char *value) {
+	if (wsProcessor.find(id) == wsProcessor.end()) {
+		return 0;
 	}
 
+	return wsProcessor[id]->SetHeader(key, value);
 }
 
-MT_EXPFUNC void  __stdcall WSGetLastError(char *data) {
-
-	if (last_error.length() > 0) {
-		strcpy(data, last_error.c_str());
-		strcat(data, "\0");
+MT_EXPFUNC int __stdcall Init(const int id, const char *url_, int timeout, int heat_beat_period) {
+	if (wsProcessor.find(id) == wsProcessor.end()) {
+		return 0;
 	}
+
+	return wsProcessor[id]->Init(url_, timeout, heat_beat_period);
 }
 
+MT_EXPFUNC void __stdcall Deinit(const int id) {
+	if (wsProcessor.find(id) == wsProcessor.end()) {
+		return;
+	}
+
+	wsProcessor[id]->Deinit();
+	delete wsProcessor[id];
+}
+
+MT_EXPFUNC void __stdcall WSGetLastError(const int id, char *data) {
+	if (wsProcessor.find(id) == wsProcessor.end()) {
+		return;
+	}
+
+	wsProcessor[id]->WSGetLastError(data);
+}
+
+MT_EXPFUNC int __stdcall GetCommand(const int id, char *data) {
+	if (wsProcessor.find(id) == wsProcessor.end()) {
+		return 0;
+	}
+
+	cout << "GetCommand" << endl;
+
+	return wsProcessor[id]->GetCommand(data);
+}
+
+MT_EXPFUNC int __stdcall SendCommand(const int id, const char *command) {
+	if (wsProcessor.find(id) == wsProcessor.end()) {
+		return 0;
+	}
+
+	return wsProcessor[id]->SendCommand(command);
+}
+
+
+// The rest of the code remains unchanged
 MT_EXPFUNC int  __stdcall httpSendPost(const char* url_, const char * input, int timeout, char *output) {
 	ix::HttpResponsePtr out;
 	std::string url(url_);
@@ -141,25 +249,6 @@ MT_EXPFUNC int  __stdcall httpSendPost(const char* url_, const char * input, int
 	}
 
 	return statusCode;
-}
-
-MT_EXPFUNC int  __stdcall GetCommand(char *data) {
-
-	if (messages.size() > 0) {
-		strcpy(data, messages.back().c_str());
-		strcat(data, "\0");
-
-		messages.pop_back();
-
-		return 1;
-	}
-
-	return 0;
-}
-
-MT_EXPFUNC int  __stdcall SendCommand(const char *command) {
-	webSocket.send(command);
-	return 1;
 }
 
 inline bool is_base64(unsigned char c) {
@@ -215,6 +304,8 @@ std::string base64_decode(std::string const& encoded_string) {
 MT_EXPFUNC int  __stdcall base64Decode(const char* data, char *out) {
 	strcpy(out, base64_decode(data).c_str());
 	strcat(out, "\0");
+
+	return 0;
 }
 
 char* getMAC_Address()
@@ -248,7 +339,6 @@ MT_EXPFUNC int  __stdcall getMAC(char *out) {
 
 	return 0;
 }
-
 
 MT_EXPFUNC int  __stdcall loadCache(const char* path) {
 	Params.Init(path);
